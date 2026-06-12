@@ -1,15 +1,16 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import multer from 'multer';
-import { mkdirSync, renameSync } from 'node:fs';
+import { mkdirSync, renameSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import type { JsonStore } from '../lib/storage.js';
 import { makeId, nowIso } from '../lib/id.js';
-import { requireAuth, requirePermission, type AuthedRequest } from '../middleware/auth.js';
+import { requirePermission, type AuthedRequest } from '../middleware/auth.js';
 import { writeAudit } from '../services/auditLog.js';
-import { fetchGitHubRelease } from '../services/githubImport.js';
+import { fetchGitHubRelease, fetchLatestGitHubRelease, selectGitHubAsset, versionFromTag } from '../services/githubImport.js';
 import type { Env } from '../config/env.js';
-import type { AppRelease } from '../types.js';
+import type { AppRelease, GitHubAppSource, ReleaseChannel } from '../types.js';
+import { detectPackageKind, validatePackageMetadata } from '../services/packageValidator.js';
 
 const releaseSchema = z.object({
   version: z.string().min(1),
@@ -23,16 +24,21 @@ const releaseSchema = z.object({
   releaseNotes: z.string().optional(),
 });
 
-const githubImportSchema = z.object({
+const githubSourceSchema = z.object({
   owner: z.string().min(1),
   repo: z.string().min(1),
-  tag: z.string().min(1),
-  appId: z.string().min(1),
   channel: z.enum(['stable','beta','dev']).default('stable'),
   platform: z.string().min(1).default('windows-x64'),
-  entrypoint: z.string().min(1).default(''),
+  assetPattern: z.string().min(1).default('*.zip'),
+  entrypoint: z.string().min(1).default('echo-app.json'),
+  installType: z.enum(['portable','installer']).default('portable'),
+  includePrereleases: z.coerce.boolean().default(false),
+  tag: z.string().optional(),
 });
 
+const githubImportSchema = githubSourceSchema.extend({
+  appId: z.string().min(1),
+});
 
 function safeFileName(name: string): string {
   return name.replace(/[^a-zA-Z0-9._-]/g, '-');
@@ -53,6 +59,68 @@ function newestRelease(releases: AppRelease[]): AppRelease | undefined {
   return [...releases].sort((a, b) => compareVersion(a.version, b.version))[releases.length - 1];
 }
 
+async function resolveGitHubSource(input: z.infer<typeof githubSourceSchema>, env: Env) {
+  const release = input.tag
+    ? await fetchGitHubRelease({ owner: input.owner, repo: input.repo, tag: input.tag, token: env.githubToken })
+    : await fetchLatestGitHubRelease({ owner: input.owner, repo: input.repo, channel: input.channel, includePrereleases: input.includePrereleases, token: env.githubToken });
+  const asset = selectGitHubAsset(release, input.assetPattern);
+  if (!asset) throw new Error('GitHub release has no downloadable assets matching the asset pattern.');
+  return { release, asset };
+}
+
+function buildSource(input: z.infer<typeof githubSourceSchema>, release: Awaited<ReturnType<typeof resolveGitHubSource>>['release'], asset: Awaited<ReturnType<typeof resolveGitHubSource>>['asset'], updateAvailable: boolean): GitHubAppSource {
+  return {
+    type: 'github_release',
+    owner: input.owner,
+    repo: input.repo,
+    channel: input.channel as ReleaseChannel,
+    platform: input.platform,
+    assetPattern: input.assetPattern,
+    entrypoint: input.entrypoint,
+    installType: input.installType,
+    includePrereleases: input.includePrereleases,
+    tag: input.tag,
+    latestTag: release.tagName,
+    latestName: release.name,
+    latestAssetName: asset.name,
+    latestAssetUrl: asset.browser_download_url,
+    latestAssetSize: asset.size,
+    latestCheckedAt: nowIso(),
+    updateAvailable,
+  };
+}
+
+function hasPublishedRelease(releases: AppRelease[], appId: string, version: string, platform: string, channel: string): boolean {
+  return releases.some((item) => item.appId === appId && item.version === version && item.platform === platform && item.channel === channel && item.status === 'published');
+}
+
+function makeGitHubRelease(input: z.infer<typeof githubSourceSchema>, appId: string, release: Awaited<ReturnType<typeof resolveGitHubSource>>['release'], asset: Awaited<ReturnType<typeof resolveGitHubSource>>['asset']): AppRelease {
+  const validation = validatePackageMetadata({ fileName: asset.name, sizeBytes: asset.size, version: versionFromTag(release.tagName), platform: input.platform, entrypoint: input.entrypoint || 'echo-app.json', installType: input.installType });
+  if (!validation.ok) throw new Error(`GitHub package validation failed: ${validation.errors.join(' ')}`);
+  return {
+    id: makeId('rel'),
+    appId,
+    version: versionFromTag(release.tagName),
+    channel: input.channel,
+    platform: input.platform,
+    packageUrl: asset.browser_download_url,
+    packageFileName: asset.name,
+    sizeBytes: asset.size,
+    entrypoint: input.entrypoint || 'echo-app.json',
+    installType: input.installType,
+    sourceType: 'github_release',
+    sourceRepo: `${input.owner}/${input.repo}`,
+    sourceTag: release.tagName,
+    sourceAssetName: asset.name,
+    packageKind: detectPackageKind(asset.name),
+    validation,
+    changelog: release.body.split('\n').filter(Boolean),
+    releaseNotes: release.name,
+    status: 'draft',
+    createdAt: nowIso(),
+  };
+}
+
 export function releaseRoutes(store: JsonStore, env: Env): Router {
   const router = Router();
   const tmpDir = join(env.dataDir, 'tmp');
@@ -70,7 +138,7 @@ export function releaseRoutes(store: JsonStore, env: Env): Router {
     const release = store.update((db) => {
       const app = db.apps.find((a) => a.id === req.params.appId);
       if (!app) return null;
-      const item = { id: makeId('rel'), appId: req.params.appId, status: 'draft' as const, createdAt: nowIso(), ...parsed.data };
+      const item = { id: makeId('rel'), appId: req.params.appId, status: 'draft' as const, sourceType: 'upload' as const, createdAt: nowIso(), ...parsed.data };
       db.releases.push(item);
       return item;
     });
@@ -79,10 +147,25 @@ export function releaseRoutes(store: JsonStore, env: Env): Router {
     res.status(201).json({ release });
   });
 
+  router.post('/admin/package/validate', ...requirePermission(store, 'releases.create'), upload.single('file'), (req: AuthedRequest, res) => {
+    try {
+      if (!req.file) return res.status(400).json({ error: 'Missing package file.' });
+      const parsed = releaseSchema.omit({ packageUrl: true, sizeBytes: true, changelog: true, releaseNotes: true }).safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+      const report = validatePackageMetadata({ fileName: req.file.originalname || 'package.echoapp', sizeBytes: req.file.size, version: parsed.data.version, platform: parsed.data.platform, entrypoint: parsed.data.entrypoint, installType: parsed.data.installType });
+      rmSync(req.file.path, { force: true });
+      res.status(report.ok ? 200 : 400).json({ report });
+    } catch (error) {
+      res.status(400).json({ error: error instanceof Error ? error.message : 'Package validation failed.' });
+    }
+  });
+
   router.post('/admin/apps/:appId/releases/upload', ...requirePermission(store, 'releases.create'), upload.single('file'), (req: AuthedRequest, res) => {
     if (!req.file) return res.status(400).json({ error: 'Missing package file.' });
     const parsed = releaseSchema.omit({ packageUrl: true, sizeBytes: true }).safeParse({ ...req.body, changelog: String(req.body.changelog ?? '').split('\n').filter(Boolean) });
     if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+    const validation = validatePackageMetadata({ fileName: req.file.originalname || 'package.echoapp', sizeBytes: req.file.size, version: parsed.data.version, platform: parsed.data.platform, entrypoint: parsed.data.entrypoint, installType: parsed.data.installType });
+    if (!validation.ok) { rmSync(req.file.path, { force: true }); return res.status(400).json({ error: `Package validation failed: ${validation.errors.join(' ')}`, report: validation }); }
     const releaseId = makeId('rel');
     const fileName = `${releaseId}-${safeFileName(req.file.originalname || 'package.zip')}`;
     const targetDir = join(env.dataDir, 'packages', req.params.appId, parsed.data.version, parsed.data.platform);
@@ -92,7 +175,7 @@ export function releaseRoutes(store: JsonStore, env: Env): Router {
     const release = store.update((db) => {
       const app = db.apps.find((a) => a.id === req.params.appId);
       if (!app) return null;
-      const item = { id: releaseId, appId: req.params.appId, status: 'draft' as const, createdAt: nowIso(), packageUrl, packageFileName: fileName, sizeBytes: req.file?.size, ...parsed.data };
+      const item = { id: releaseId, appId: req.params.appId, status: 'draft' as const, sourceType: 'upload' as const, createdAt: nowIso(), packageUrl, packageFileName: fileName, sizeBytes: req.file?.size, packageKind: detectPackageKind(req.file?.originalname || fileName), validation, ...parsed.data };
       db.releases.push(item);
       return item;
     });
@@ -101,37 +184,106 @@ export function releaseRoutes(store: JsonStore, env: Env): Router {
     res.status(201).json({ release });
   });
 
+  router.post('/admin/github-source/test', ...requirePermission(store, 'releases.create'), async (req, res) => {
+    try {
+      const parsed = githubSourceSchema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+      const { release, asset } = await resolveGitHubSource(parsed.data, env);
+      const validation = validatePackageMetadata({ fileName: asset.name, sizeBytes: asset.size, version: versionFromTag(release.tagName), platform: parsed.data.platform, entrypoint: parsed.data.entrypoint, installType: parsed.data.installType });
+      res.json({ ok: validation.ok, release: { tagName: release.tagName, name: release.name, prerelease: release.prerelease, asset, validation } });
+    } catch (error) {
+      res.status(400).json({ error: error instanceof Error ? error.message : 'GitHub source test failed.' });
+    }
+  });
+
+  router.post('/admin/apps/:appId/github-source', ...requirePermission(store, 'releases.create'), async (req: AuthedRequest, res) => {
+    try {
+      const parsed = githubSourceSchema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+      const { release, asset } = await resolveGitHubSource(parsed.data, env);
+      const version = versionFromTag(release.tagName);
+      const app = store.update((db) => {
+        const item = db.apps.find((a) => a.id === req.params.appId);
+        if (!item) return null;
+        item.githubSource = buildSource(parsed.data, release, asset, !hasPublishedRelease(db.releases, item.id, version, parsed.data.platform, parsed.data.channel));
+        item.updatedAt = nowIso();
+        return item;
+      });
+      if (!app) return res.status(404).json({ error: 'App not found.' });
+      writeAudit(store, { actorUserId: req.user?.id, action: 'admin.app.github_source.saved', targetType: 'app', targetId: req.params.appId, details: { repo: `${parsed.data.owner}/${parsed.data.repo}`, tag: release.tagName } });
+      res.json({ app, source: app.githubSource });
+    } catch (error) {
+      res.status(400).json({ error: error instanceof Error ? error.message : 'GitHub source save failed.' });
+    }
+  });
+
+  router.post('/admin/apps/:appId/github-source/check', ...requirePermission(store, 'releases.create'), async (req: AuthedRequest, res) => {
+    try {
+      const db = store.read();
+      const existing = db.apps.find((a) => a.id === req.params.appId)?.githubSource;
+      const parsed = githubSourceSchema.safeParse({ ...(existing ?? {}), ...(req.body ?? {}) });
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+      const { release, asset } = await resolveGitHubSource(parsed.data, env);
+      const version = versionFromTag(release.tagName);
+      const app = store.update((nextDb) => {
+        const item = nextDb.apps.find((a) => a.id === req.params.appId);
+        if (!item) return null;
+        item.githubSource = buildSource(parsed.data, release, asset, !hasPublishedRelease(nextDb.releases, item.id, version, parsed.data.platform, parsed.data.channel));
+        item.updatedAt = nowIso();
+        return item;
+      });
+      if (!app) return res.status(404).json({ error: 'App not found.' });
+      writeAudit(store, { actorUserId: req.user?.id, action: 'admin.app.github_source.checked', targetType: 'app', targetId: req.params.appId, details: { tag: release.tagName, updateAvailable: app.githubSource?.updateAvailable } });
+      res.json({ app, source: app.githubSource });
+    } catch (error) {
+      res.status(400).json({ error: error instanceof Error ? error.message : 'GitHub source check failed.' });
+    }
+  });
+
+  router.post('/admin/apps/:appId/github-source/import-latest', ...requirePermission(store, 'releases.create'), async (req: AuthedRequest, res) => {
+    try {
+      const db = store.read();
+      const existing = db.apps.find((a) => a.id === req.params.appId)?.githubSource;
+      const parsed = githubSourceSchema.safeParse({ ...(existing ?? {}), ...(req.body ?? {}) });
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+      const { release, asset } = await resolveGitHubSource(parsed.data, env);
+      const version = versionFromTag(release.tagName);
+      const result = store.update((nextDb) => {
+        const app = nextDb.apps.find((a) => a.id === req.params.appId);
+        if (!app) return null;
+        const existingRelease = nextDb.releases.find((item) => item.appId === app.id && item.version === version && item.platform === parsed.data.platform && item.channel === parsed.data.channel && item.sourceType === 'github_release');
+        const rel = existingRelease ?? makeGitHubRelease(parsed.data, app.id, release, asset);
+        if (!existingRelease) nextDb.releases.push(rel);
+        app.githubSource = { ...buildSource(parsed.data, release, asset, !hasPublishedRelease(nextDb.releases, app.id, version, parsed.data.platform, parsed.data.channel)), lastImportedTag: release.tagName, lastImportedReleaseId: rel.id };
+        app.updatedAt = nowIso();
+        return { app, release: rel, existing: Boolean(existingRelease) };
+      });
+      if (!result) return res.status(404).json({ error: 'App not found.' });
+      writeAudit(store, { actorUserId: req.user?.id, action: 'admin.release.github.imported', targetType: 'release', targetId: result.release.id, details: { repo: `${parsed.data.owner}/${parsed.data.repo}`, tag: release.tagName, existing: result.existing } });
+      res.status(result.existing ? 200 : 201).json(result);
+    } catch (error) {
+      res.status(400).json({ error: error instanceof Error ? error.message : 'GitHub release import failed.' });
+    }
+  });
+
   router.post('/admin/releases/import-github', ...requirePermission(store, 'releases.create'), async (req: AuthedRequest, res) => {
-    const parsed = githubImportSchema.safeParse(req.body);
-    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-    const info = await fetchGitHubRelease({ owner: parsed.data.owner, repo: parsed.data.repo, tag: parsed.data.tag, token: env.githubToken });
-    const asset = info.assets.find((item) => item.name.endsWith('.zip')) ?? info.assets[0];
-    if (!asset) return res.status(404).json({ error: 'GitHub release has no downloadable assets.' });
-    const release = store.update((db) => {
-      const app = db.apps.find((a) => a.id === parsed.data.appId);
-      if (!app) return null;
-      const item = {
-        id: makeId('rel'),
-        appId: parsed.data.appId,
-        version: parsed.data.tag.replace(/^v/, ''),
-        channel: parsed.data.channel,
-        platform: parsed.data.platform,
-        packageUrl: asset.browser_download_url,
-        packageFileName: asset.name,
-        sizeBytes: asset.size,
-        entrypoint: parsed.data.entrypoint || 'echo-app.json',
-        installType: 'portable' as const,
-        changelog: info.body.split('\n').filter(Boolean),
-        releaseNotes: info.name,
-        status: 'draft' as const,
-        createdAt: nowIso(),
-      };
-      db.releases.push(item);
-      return item;
-    });
-    if (!release) return res.status(404).json({ error: 'App not found.' });
-    writeAudit(store, { actorUserId: req.user?.id, action: 'admin.release.github.imported', targetType: 'release', targetId: release.id, details: { tag: info.tagName } });
-    res.status(201).json({ release });
+    try {
+      const parsed = githubImportSchema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+      const { release, asset } = await resolveGitHubSource(parsed.data, env);
+      const imported = store.update((db) => {
+        const app = db.apps.find((a) => a.id === parsed.data.appId);
+        if (!app) return null;
+        const item = makeGitHubRelease(parsed.data, app.id, release, asset);
+        db.releases.push(item);
+        return item;
+      });
+      if (!imported) return res.status(404).json({ error: 'App not found.' });
+      writeAudit(store, { actorUserId: req.user?.id, action: 'admin.release.github.imported', targetType: 'release', targetId: imported.id, details: { tag: release.tagName } });
+      res.status(201).json({ release: imported });
+    } catch (error) {
+      res.status(400).json({ error: error instanceof Error ? error.message : 'GitHub release import failed.' });
+    }
   });
 
   router.post('/admin/releases/:id/submit-review', ...requirePermission(store, 'releases.create'), (req: AuthedRequest, res) => {

@@ -3,6 +3,8 @@ import { accessSync, constants, existsSync, mkdirSync, readFileSync, rmSync, wri
 import { createServer } from 'node:net';
 import { resolve, join } from 'node:path';
 import { spawn } from 'node:child_process';
+import { runUpdateCommand } from './update.js';
+import { runServiceCommand, serviceDoctorSummary } from './service.js';
 import { stdin as input, stdout as output } from 'node:process';
 import readline from 'node:readline/promises';
 import { hashPassword } from '../auth/passwordHash.js';
@@ -41,31 +43,56 @@ function printHelp(): void {
   banner();
   console.log(`
 Usage:
-  echo-server                         Show command-center summary
-  echo-server setup                   Run guided setup wizard
-  echo-server start                   Start server in this terminal
-  echo-server stop                    Stop a running server started by Echo
-  echo-server restart                 Stop, then start server in this terminal
-  echo-server status                  Show config, server health, and counts
-  echo-server doctor                  Run setup/config/network diagnostics
-  echo-server url                     Show App Center connection URL
-  echo-server users [pending]         List users
-  echo-server approve <username>      Approve pending user
-  echo-server reject <username>       Reject user
-  echo-server disable <username>      Disable user and clear sessions
-  echo-server role <username> <role>  Set role: ${roles.join('|')}
-  echo-server apps                    List apps
-  echo-server releases                List releases
-  echo-server clients                 List App Center clients
-  echo-server logs [count]            Show latest audit logs
-  echo-server config                  Show current server config
-  echo-server help                    Show this help
+  echo-server                                      Open command-center mode
+  echo-server onboard                             Run first-run onboarding
+  echo-server setup                               Run guided setup wizard
+  echo-server start                               Start server in this terminal
+  echo-server stop                                Stop a running server started by Echo
+  echo-server restart                             Stop, then start server in this terminal
+  echo-server status                              Show config, server health, and counts
+  echo-server doctor                              Run setup/config/network diagnostics
+  echo-server dashboard                           Open/show server dashboard URL
+  echo-server install-info                        Show GitHub one-line install/update source
+  echo-server service <install|start|stop|status> Manage background service/logon task
+  echo-server update --check                      Check GitHub Releases for updates
+  echo-server update --dry-run                    Preview update actions
+  echo-server update                              Back up, download, apply, build, restart, doctor
+  echo-server update --rollback                   Restore latest updater backup
+  echo-server config show                         Show current server config
+  echo-server config set <key> <value>            Set config value
+  echo-server node setup                          Request to join a primary as a node
+  echo-server node status                         Show local node approval/sync status
+  echo-server node doctor                         Check local node configuration
+  echo-server node promote                        Promote standby/full backup to primary mode
+  echo-server sync setup                          Enable primary sync/node approval mode
+  echo-server sync status                         Show sync and node status
+  echo-server sync nodes                          List approved nodes
+  echo-server sync requests                       List pending node requests
+  echo-server sync approve <request-id>           Approve a pending node request
+  echo-server sync reject <request-id>            Reject a pending node request
+  echo-server sync now                            Mark a manual sync cycle
+  echo-server url                                 Show App Center connection URL
+  echo-server users [pending]                     List users
+  echo-server approve <username>                  Approve pending user
+  echo-server reject <username>                   Reject user
+  echo-server disable <username>                  Disable user and clear sessions
+  echo-server role <username> <role>              Set role: ${roles.join('|')}
+  echo-server apps                                List apps
+  echo-server releases                            List releases
+  echo-server clients                             List App Center clients
+  echo-server logs [count]                        Show latest audit logs
+  echo-server help                                Show this help
+
+Config keys:
+  host, port, public-url, data-dir, cors, github-token
+  update.repo, update.channel, update.asset
 
 Runtime slash commands:
   After starting the server, type /help in that server terminal.
 
 Notes:
   Use echo-server, not echo. On Windows, echo is a built-in shell command.
+  The updater pulls from GitHub Releases. Create release assets before using echo-server update.
 `);
 }
 
@@ -99,6 +126,9 @@ function writeEnvFile(values: Map<string, string>, path = ENV_PATH): void {
     'ECHO_DATA_DIR',
     'ECHO_CORS_ORIGIN',
     'ECHO_GITHUB_TOKEN',
+    'ECHO_UPDATE_REPO',
+    'ECHO_UPDATE_CHANNEL',
+    'ECHO_UPDATE_ASSET_PATTERN',
   ];
   const lines = [
     '# Echo App Server configuration',
@@ -544,6 +574,7 @@ async function restartServer(): Promise<void> {
 
 function showConfig(): void {
   const config = loadConfig();
+  const env = readEnvFile();
   console.log('Echo App Server config');
   console.log(`  .env:             ${ENV_PATH}`);
   console.log(`  Bind:             ${config.host}:${config.port}`);
@@ -551,6 +582,46 @@ function showConfig(): void {
   console.log(`  Data directory:   ${absoluteDataDir(config.dataDir)}`);
   console.log(`  CORS:             ${config.corsOrigin}`);
   console.log(`  GitHub token:     ${config.githubToken ? 'set' : 'not set'}`);
+  console.log(`  Update repo:      ${env.get('ECHO_UPDATE_REPO') || (process.platform === 'win32' ? 'zmvz11/echo-app-server-windows' : 'zmvz11/echo-app-server-linux')}`);
+  console.log(`  Update channel:   ${env.get('ECHO_UPDATE_CHANNEL') || 'stable'}`);
+  console.log(`  Update asset:     ${env.get('ECHO_UPDATE_ASSET_PATTERN') || (process.platform === 'win32' ? 'echo-app-server-windows*.zip' : 'echo-app-server-linux*.zip')}`);
+}
+
+function setConfigValue(keyRaw: string | undefined, value: string | undefined): void {
+  if (!keyRaw || value === undefined) {
+    console.log('Usage: echo-server config set <key> <value>');
+    console.log('Keys: host, port, public-url, data-dir, cors, github-token, update.repo, update.channel, update.asset');
+    return;
+  }
+  const keyMap: Record<string, string> = {
+    host: 'ECHO_SERVER_HOST',
+    port: 'ECHO_SERVER_PORT',
+    'public-url': 'ECHO_PUBLIC_BASE_URL',
+    'data-dir': 'ECHO_DATA_DIR',
+    cors: 'ECHO_CORS_ORIGIN',
+    'github-token': 'ECHO_GITHUB_TOKEN',
+    'update.repo': 'ECHO_UPDATE_REPO',
+    'update.channel': 'ECHO_UPDATE_CHANNEL',
+    'update.asset': 'ECHO_UPDATE_ASSET_PATTERN',
+  };
+  const envKey = keyMap[keyRaw];
+  if (!envKey) throw new Error(`Unknown config key: ${keyRaw}`);
+  if (envKey === 'ECHO_SERVER_PORT') {
+    const port = Number.parseInt(value, 10);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Port must be 1 to 65535.');
+  }
+  if (envKey === 'ECHO_UPDATE_CHANNEL' && !['stable', 'beta', 'dev'].includes(value)) throw new Error('Update channel must be stable, beta, or dev.');
+  const env = readEnvFile();
+  env.set(envKey, value);
+  writeEnvFile(env);
+  console.log(`Set ${keyRaw} = ${envKey === 'ECHO_GITHUB_TOKEN' && value ? '[hidden]' : value}`);
+}
+
+function handleConfigCommand(args: string[]): void {
+  const sub = (args[0] || 'show').toLowerCase();
+  if (sub === 'show' || sub === 'list') return showConfig();
+  if (sub === 'set') return setConfigValue(args[1], args.slice(2).join(' '));
+  console.log('Usage: echo-server config show | echo-server config set <key> <value>');
 }
 
 async function showStatus(): Promise<void> {
@@ -666,6 +737,232 @@ function showLogs(countRaw?: string): void {
   for (const log of logs) console.log(`${log.createdAt} ${log.action} ${log.targetType}${log.targetId ? `:${log.targetId}` : ''}`);
 }
 
+
+function requestedPermissionsForNodeType(nodeType: string): string[] {
+  if (nodeType === 'download_mirror') return ['canPullPackages', 'canPullMedia', 'canServeDownloads'];
+  if (nodeType === 'standby_backup') return ['canPullPackages', 'canPullMedia', 'canServeDownloads', 'canPullDatabaseBackup', 'canBePromoted'];
+  if (nodeType === 'full_backup') return ['canPullPackages', 'canPullMedia', 'canServeDownloads', 'canPullDatabaseBackup', 'canBePromoted'];
+  return [];
+}
+
+function nodeFingerprint(): string {
+  const env = readEnvFile();
+  let value = env.get('ECHO_NODE_FINGERPRINT');
+  if (value) return value;
+  value = makeId('node_fp');
+  env.set('ECHO_NODE_FINGERPRINT', value);
+  writeEnvFile(env);
+  return value;
+}
+
+async function postJson<T>(url: string, body: unknown): Promise<T> {
+  const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error ?? `Request failed: ${response.status}`);
+  return data as T;
+}
+
+async function getJson<T>(url: string): Promise<T> {
+  const response = await fetch(url);
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error ?? `Request failed: ${response.status}`);
+  return data as T;
+}
+
+function primaryUrlFromParts(ip: string, port: string): string {
+  const host = ip.trim().replace(/^https?:\/\//, '').replace(/\/$/, '');
+  return `http://${host}:${port.trim() || '8080'}`.replace(/\/$/, '');
+}
+
+async function runNodeSetup(args: string[]): Promise<void> {
+  const flags = parseFlags(args);
+  const rl = readline.createInterface({ input, output });
+  const ask = async (prompt: string, fallback: string) => {
+    const value = flagString(flags, prompt.toLowerCase().replace(/[^a-z0-9]+/g, ''));
+    if (value) return value;
+    const answer = await rl.question(`${prompt} (${fallback}): `);
+    return answer.trim() || fallback;
+  };
+  try {
+    const nickname = await ask('Node nickname', 'Download Node');
+    const typeAnswer = await ask('Node type download_mirror|standby_backup|full_backup', 'download_mirror');
+    const nodeType = ['download_mirror', 'standby_backup', 'full_backup'].includes(typeAnswer) ? typeAnswer : 'download_mirror';
+    const primaryIp = await ask('Primary server IP', '127.0.0.1');
+    const primaryPort = await ask('Primary server port', '8080');
+    const nodeIp = await ask('This node IP', '127.0.0.1');
+    const nodePort = await ask('This node port', '8080');
+    const primaryBaseUrl = primaryUrlFromParts(primaryIp, primaryPort);
+    const nodeBaseUrl = primaryUrlFromParts(nodeIp, nodePort);
+    const fingerprint = nodeFingerprint();
+    const result = await postJson<{ requestId: string; status: string; message: string }>(`${primaryBaseUrl}/api/nodes/join-request`, {
+      nickname,
+      nodeType,
+      baseUrl: nodeBaseUrl,
+      fingerprint,
+      requestedPermissions: requestedPermissionsForNodeType(nodeType),
+    });
+    const env = readEnvFile();
+    env.set('ECHO_NODE_MODE', String(nodeType));
+    env.set('ECHO_NODE_NICKNAME', nickname);
+    env.set('ECHO_NODE_BASE_URL', nodeBaseUrl);
+    env.set('ECHO_PRIMARY_BASE_URL', primaryBaseUrl);
+    env.set('ECHO_NODE_REQUEST_ID', result.requestId);
+    writeEnvFile(env);
+    console.log('\nJoin request sent.');
+    console.log(`  Primary: ${primaryBaseUrl}`);
+    console.log(`  Request: ${result.requestId}`);
+    console.log('Open Echo App Center → Settings → Server Nodes to accept or reject it.');
+    console.log('After approval, run: echo-server node status');
+  } finally {
+    rl.close();
+  }
+}
+
+async function runNodeStatus(): Promise<void> {
+  const env = readEnvFile();
+  const primary = env.get('ECHO_PRIMARY_BASE_URL');
+  const requestId = env.get('ECHO_NODE_REQUEST_ID');
+  const fingerprint = env.get('ECHO_NODE_FINGERPRINT');
+  banner();
+  console.log('Node status');
+  console.log(`  Mode:        ${env.get('ECHO_NODE_MODE') || 'primary/standalone'}`);
+  console.log(`  Nickname:    ${env.get('ECHO_NODE_NICKNAME') || 'not set'}`);
+  console.log(`  Node URL:    ${env.get('ECHO_NODE_BASE_URL') || 'not set'}`);
+  console.log(`  Primary:     ${primary || 'not set'}`);
+  console.log(`  Request ID:  ${requestId || 'not set'}`);
+  console.log(`  Token:       ${env.get('ECHO_NODE_TOKEN') ? 'stored' : 'not stored'}`);
+  if (primary && requestId && fingerprint) {
+    const status = await getJson<{ status: string; token?: string; nodeId?: string; rejectionReason?: string }>(`${primary}/api/nodes/join-request/${requestId}/status?fingerprint=${encodeURIComponent(fingerprint)}`);
+    console.log(`  Primary says: ${status.status}`);
+    if (status.status === 'approved' && status.token) {
+      env.set('ECHO_NODE_TOKEN', status.token);
+      if (status.nodeId) env.set('ECHO_NODE_ID', status.nodeId);
+      writeEnvFile(env);
+      console.log('  Node token saved. This node can now sync according to approved permissions.');
+    }
+    if (status.status === 'rejected') console.log(`  Reason: ${status.rejectionReason || 'Rejected by admin.'}`);
+  }
+}
+
+async function runNodeDoctor(): Promise<void> {
+  const env = readEnvFile();
+  banner();
+  console.log('Node doctor');
+  console.log(`${env.get('ECHO_NODE_MODE') ? 'PASS' : 'WARN'} Node mode ${env.get('ECHO_NODE_MODE') || 'not configured'}`);
+  console.log(`${env.get('ECHO_PRIMARY_BASE_URL') ? 'PASS' : 'WARN'} Primary URL ${env.get('ECHO_PRIMARY_BASE_URL') || 'not configured'}`);
+  console.log(`${env.get('ECHO_NODE_BASE_URL') ? 'PASS' : 'WARN'} Node URL ${env.get('ECHO_NODE_BASE_URL') || 'not configured'}`);
+  console.log(`${env.get('ECHO_NODE_TOKEN') ? 'PASS' : 'WARN'} Node token ${env.get('ECHO_NODE_TOKEN') ? 'stored' : 'not approved yet'}`);
+  if (env.get('ECHO_PRIMARY_BASE_URL')) {
+    try { await getJson(`${env.get('ECHO_PRIMARY_BASE_URL')}/health`); console.log('PASS Primary health reachable'); }
+    catch (error) { console.log(`WARN Primary health ${error instanceof Error ? error.message : String(error)}`); }
+  }
+}
+
+function runNodePromote(): void {
+  const env = readEnvFile();
+  env.set('ECHO_NODE_MODE', 'primary');
+  env.delete('ECHO_PRIMARY_BASE_URL');
+  env.delete('ECHO_NODE_TOKEN');
+  env.delete('ECHO_NODE_REQUEST_ID');
+  writeEnvFile(env);
+  console.log('This server has been marked as primary mode. Review .env, restart Echo App Server, and point App Centers at this server.');
+}
+
+async function handleNodeCommand(args: string[]): Promise<void> {
+  const sub = (args.shift() || 'status').toLowerCase();
+  if (sub === 'setup' || sub === 'join') return runNodeSetup(args);
+  if (sub === 'status') return runNodeStatus();
+  if (sub === 'doctor') return runNodeDoctor();
+  if (sub === 'promote') return runNodePromote();
+  console.log('Usage: echo-server node setup | status | doctor | promote');
+}
+
+function showSyncStatus(): void {
+  const db = getStore().read();
+  banner();
+  console.log('Sync status');
+  console.log(`  Enabled:           ${db.syncSettings?.enabled ? 'yes' : 'no'}`);
+  console.log(`  Require approval:  ${db.syncSettings?.requireApproval !== false ? 'yes' : 'no'}`);
+  console.log(`  Interval:          ${db.syncSettings?.intervalMinutes ?? 15} minutes`);
+  console.log(`  Nodes:             ${db.nodes.length}`);
+  console.log(`  Pending requests:  ${db.nodeRequests.filter((item) => item.status === 'pending').length}`);
+}
+
+function listNodeRequests(): void {
+  const requests = getStore().read().nodeRequests.filter((item) => item.status === 'pending');
+  if (!requests.length) { console.log('No pending node requests.'); return; }
+  for (const request of requests) console.log(`${request.id.padEnd(34)} ${request.nodeType.padEnd(16)} ${request.nickname.padEnd(24)} ${request.baseUrl}`);
+}
+
+function listNodes(): void {
+  const nodes = getStore().read().nodes;
+  if (!nodes.length) { console.log('No approved nodes.'); return; }
+  for (const node of nodes) console.log(`${node.id.padEnd(30)} ${node.nodeType.padEnd(16)} ${node.status.padEnd(10)} ${node.nickname.padEnd(24)} ${node.baseUrl}`);
+}
+
+function approveNodeRequest(requestId?: string): void {
+  if (!requestId) throw new Error('Usage: echo-server sync approve <request-id>');
+  const result = getStore().update((db) => {
+    const request = db.nodeRequests.find((item) => item.id === requestId && item.status === 'pending');
+    if (!request) return null;
+    const token = makeId('node_token');
+    const permissions = Object.fromEntries(['canPullPackages','canPullMedia','canServeDownloads','canPullDatabaseBackup','canBePromoted','canRunAdminApi'].map((key) => [key, requestedPermissionsForNodeType(request.nodeType).includes(key)])) as any;
+    const node = { id: makeId('node'), nickname: request.nickname, nodeType: request.nodeType, baseUrl: request.baseUrl, fingerprint: request.fingerprint, token, status: 'approved' as const, permissions, createdAt: nowIso(), approvedAt: nowIso(), approvedBy: 'cli', healthMessage: 'Approved from CLI.' };
+    request.status = 'approved'; request.reviewedAt = nowIso(); request.reviewedBy = 'cli'; request.nodeId = node.id; request.token = token;
+    db.nodes.unshift(node);
+    addAudit(db, 'cli.node.approved', 'node', node.id, { nickname: node.nickname });
+    return node;
+  });
+  if (!result) throw new Error(`Pending request not found: ${requestId}`);
+  console.log(`Approved ${result.nickname}. The node can retrieve its token with echo-server node status.`);
+}
+
+function rejectNodeRequest(requestId?: string): void {
+  if (!requestId) throw new Error('Usage: echo-server sync reject <request-id>');
+  const request = getStore().update((db) => {
+    const item = db.nodeRequests.find((candidate) => candidate.id === requestId && candidate.status === 'pending');
+    if (!item) return null;
+    item.status = 'rejected'; item.reviewedAt = nowIso(); item.reviewedBy = 'cli'; item.rejectionReason = 'Rejected from CLI.';
+    addAudit(db, 'cli.node.rejected', 'node_request', item.id, { nickname: item.nickname });
+    return item;
+  });
+  if (!request) throw new Error(`Pending request not found: ${requestId}`);
+  console.log(`Rejected ${request.nickname}.`);
+}
+
+function runSyncSetup(): void {
+  const store = getStore();
+  const syncSettings = store.update((db) => {
+    db.syncSettings = { enabled: true, requireApproval: true, intervalMinutes: 15, allowDownloadMirrors: true, allowStandbyBackups: true, lastConfiguredAt: nowIso() };
+    addAudit(db, 'cli.sync.configured', 'sync_settings');
+    return db.syncSettings;
+  });
+  console.log('Sync/node approval is enabled.');
+  console.log(`  Interval: ${syncSettings.intervalMinutes} minutes`);
+  console.log('Nodes can now run: echo-server node setup');
+}
+
+function runSyncNow(): void {
+  const nodes = getStore().update((db) => {
+    for (const node of db.nodes) { node.lastSyncAt = nowIso(); node.healthMessage = 'Manual sync requested from CLI.'; }
+    addAudit(db, 'cli.sync.now', 'sync');
+    return db.nodes;
+  });
+  console.log(`Marked sync requested for ${nodes.length} node(s).`);
+}
+
+async function handleSyncCommand(args: string[]): Promise<void> {
+  const sub = (args.shift() || 'status').toLowerCase();
+  if (sub === 'setup') return runSyncSetup();
+  if (sub === 'status') return showSyncStatus();
+  if (sub === 'nodes') return listNodes();
+  if (sub === 'requests') return listNodeRequests();
+  if (sub === 'approve') return approveNodeRequest(args[0]);
+  if (sub === 'reject') return rejectNodeRequest(args[0]);
+  if (sub === 'now' || sub === 'run') return runSyncNow();
+  console.log('Usage: echo-server sync setup | status | nodes | requests | approve <id> | reject <id> | now');
+}
+
 function pushCheck(results: CheckResult[], level: CheckLevel, name: string, detail?: string): void {
   results.push({ level, name, detail });
 }
@@ -739,6 +1036,11 @@ async function runDoctor(): Promise<void> {
   if (process.platform === 'win32') pushCheck(results, 'WARN', 'Command name', 'Use echo-server. The command echo is reserved by Windows.');
   else pushCheck(results, 'PASS', 'Command name', 'echo-server');
 
+  const envForUpdate = readEnvFile();
+  pushCheck(results, 'PASS', 'Update service', serviceDoctorSummary());
+  pushCheck(results, envForUpdate.get('ECHO_UPDATE_REPO') ? 'PASS' : 'WARN', 'Update repo', envForUpdate.get('ECHO_UPDATE_REPO') || 'not set; using platform default repo');
+  pushCheck(results, envForUpdate.get('ECHO_UPDATE_CHANNEL') ? 'PASS' : 'WARN', 'Update channel', envForUpdate.get('ECHO_UPDATE_CHANNEL') || 'not set; using stable');
+
   banner();
   console.log('Doctor');
   for (const result of results) printCheck(result);
@@ -748,32 +1050,125 @@ async function runDoctor(): Promise<void> {
   if (fails > 0) process.exitCode = 1;
 }
 
-async function showCommandCenter(): Promise<void> {
-  await showStatus();
-  console.log('\nCommon commands');
-  console.log('  echo-server setup     Guided setup wizard');
-  console.log('  echo-server start     Start server in this terminal');
-  console.log('  echo-server doctor    Check config and health');
-  console.log('  echo-server users     List users');
-  console.log('  echo-server help      Full command list');
+async function openDashboard(): Promise<void> {
+  const url = `${loadConfig().publicBaseUrl}/admin`;
+  console.log(`Echo App Server dashboard: ${url}`);
+  try {
+    if (process.platform === 'win32') spawn('cmd', ['/c', 'start', '', url], { detached: true, stdio: 'ignore' }).unref();
+    else if (process.platform === 'darwin') spawn('open', [url], { detached: true, stdio: 'ignore' }).unref();
+    else spawn('xdg-open', [url], { detached: true, stdio: 'ignore' }).unref();
+  } catch {
+    // Printing the URL is enough when no desktop opener is available.
+  }
 }
 
-async function main(): Promise<void> {
-  const rawArgs = process.argv.slice(2);
-  const command = (rawArgs[0] ?? '').toLowerCase();
-  const args = rawArgs.slice(1);
 
-  if (!command) return showCommandCenter();
-  if (command === 'help' || command === '--help' || command === '-h') return printHelp();
-  if (command === 'setup' || command === 'onboard') {
+function packageVersion(): string {
+  try {
+    const pkg = JSON.parse(readFileSync(resolve(process.cwd(), 'package.json'), 'utf8')) as { version?: string };
+    return pkg.version || 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+function showInstallInfo(): void {
+  const env = readEnvFile();
+  const repo = env.get('ECHO_UPDATE_REPO') || (process.platform === 'win32' ? 'zmvz11/echo-app-server-windows' : 'zmvz11/echo-app-server-linux');
+  const asset = env.get('ECHO_UPDATE_ASSET_PATTERN') || (process.platform === 'win32' ? 'echo-app-server-windows*.zip' : 'echo-app-server-linux*.zip');
+  const channel = env.get('ECHO_UPDATE_CHANNEL') || 'stable';
+  banner();
+  console.log('Install and update source');
+  console.log(`  Version:        ${packageVersion()}`);
+  console.log(`  Repo:           ${repo}`);
+  console.log(`  Channel:        ${channel}`);
+  console.log(`  Asset pattern:  ${asset}`);
+  console.log(`  GitHub token:   ${env.get('ECHO_GITHUB_TOKEN') ? 'configured' : 'not configured / public repo mode'}`);
+  console.log('');
+  if (process.platform === 'win32') {
+    console.log('Windows one-line install:');
+    console.log('  powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/zmvz11/echo-app-server-windows/main/scripts/install.ps1 | iex"');
+  } else {
+    console.log('Linux one-line install:');
+    console.log('  curl -fsSL https://raw.githubusercontent.com/zmvz11/echo-app-server-linux/main/scripts/install.sh | bash');
+  }
+  console.log('');
+  console.log('Update commands:');
+  console.log('  echo-server update --check');
+  console.log('  echo-server update --dry-run');
+  console.log('  echo-server update');
+  console.log('  echo-server update --rollback');
+}
+
+async function runOnboard(args: string[]): Promise<void> {
+  console.log('Echo App Server onboarding');
+  const flags = parseFlags(args);
+  if (flags.defaults || flagString(flags, 'port') || flagString(flags, 'host') || flagString(flags, 'ownerUsername')) await runSetupFromFlags(flags);
+  else await runSetupWizard();
+  console.log('\nRunning doctor after onboarding...');
+  await runDoctor();
+  console.log('\nNext commands');
+  console.log('  echo-server service install');
+  console.log('  echo-server service start');
+  console.log('  echo-server dashboard');
+  console.log('  echo-server install-info');
+  console.log('  echo-server update --check');
+}
+
+async function showCommandCenter(interactive = true): Promise<void> {
+  await showStatus();
+  console.log('\nQuick commands');
+  console.log('  /onboard      Guided first-run setup');
+  console.log('  /status       Server status');
+  console.log('  /doctor       Diagnostics');
+  console.log('  /dashboard    Open/show dashboard URL');
+  console.log('  /service      Service/logon task status');
+  console.log('  /update       Check GitHub Releases for updates');
+  console.log('  /install-info Show GitHub install/update source');
+  console.log('  /sync         Show sync/node status');
+  console.log('  /nodes        List approved nodes');
+  console.log('  /users        List users');
+  console.log('  /apps         List apps');
+  console.log('  /help         Full command list');
+  console.log('  /exit         Close this command center');
+  if (!interactive || !process.stdin.isTTY) return;
+
+  const rl = readline.createInterface({ input, output, prompt: 'echo-server> ' });
+  rl.prompt();
+  for await (const line of rl) {
+    const trimmed = line.trim();
+    if (!trimmed) { rl.prompt(); continue; }
+    if (trimmed === '/exit' || trimmed === 'exit' || trimmed === 'quit') break;
+    const parsed = parseArgs(trimmed);
+    const slashCommand = parsed.shift() ?? '';
+    const normalized = slashCommand.startsWith('/') ? slashCommand.slice(1) : slashCommand;
+    await dispatchCommand(normalized, parsed);
+    rl.prompt();
+  }
+  rl.close();
+}
+
+async function dispatchCommand(commandInput: string, args: string[]): Promise<void> {
+  const command = commandInput.toLowerCase();
+  if (!command || command === 'home') return showCommandCenter(false);
+  if (command === 'help' || command === '?' || command === '--help' || command === '-h') return printHelp();
+  if (command === 'setup') {
     const flags = parseFlags(args);
     if (flags.defaults || flagString(flags, 'port') || flagString(flags, 'host') || flagString(flags, 'ownerUsername')) return runSetupFromFlags(flags);
     return runSetupWizard();
   }
+  if (command === 'onboard') return runOnboard(args);
   if (command === 'doctor' || command === 'check') return runDoctor();
   if (command === 'status') return showStatus();
   if (command === 'url') return showUrl();
-  if (command === 'config') return showConfig();
+  if (command === 'dashboard') return openDashboard();
+  if (command === 'install-info') return showInstallInfo();
+  if (command === 'config') return handleConfigCommand(args);
+  if (command === 'service' || command === 'daemon') return runServiceCommand(args);
+  if (command === 'update') return runUpdateCommand(args);
+  if (command === 'node') return handleNodeCommand(args);
+  if (command === 'sync') return handleSyncCommand(args);
+  if (command === 'nodes') return listNodes();
   if (command === 'start' || command === 'serve') return startServerForeground();
   if (command === 'stop') return stopServer();
   if (command === 'restart') return restartServer();
@@ -787,17 +1182,17 @@ async function main(): Promise<void> {
   if (command === 'clients') return listClients();
   if (command === 'logs') return showLogs(args[0]);
 
-  // Accept slash commands for users who copy from the runtime console.
-  if (command.startsWith('/')) {
-    const slashArgs = parseArgs([command, ...args].join(' '));
-    const slash = slashArgs.shift()?.replace(/^\//, '') ?? '';
-    process.argv = [process.argv[0] ?? 'node', process.argv[1] ?? '', slash, ...slashArgs];
-    return main();
-  }
-
-  console.error(`Unknown command: ${command}`);
+  console.error(`Unknown command: ${commandInput}`);
   printHelp();
   process.exitCode = 1;
+}
+
+async function main(): Promise<void> {
+  const rawArgs = process.argv.slice(2);
+  const command = (rawArgs[0] ?? '').replace(/^\//, '').toLowerCase();
+  const args = rawArgs.slice(1);
+  if (!command) return showCommandCenter(true);
+  return dispatchCommand(command, args);
 }
 
 main().catch((error: unknown) => {

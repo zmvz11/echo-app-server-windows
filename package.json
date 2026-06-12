@@ -1,6 +1,6 @@
 {
   "name": "echo-app-server",
-  "version": "1.0.0",
+  "version": "1.5.0",
   "private": false,
   "type": "module",
   "scripts": {

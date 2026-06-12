@@ -21,6 +21,8 @@ if (forbiddenRegistryMarkers.some((marker) => packageLock.includes(marker))) {
 const requiredServerFiles = [
   'src/cli/serverCommands.ts',
   'src/cli/index.ts',
+  'src/cli/update.ts',
+  'src/cli/service.ts',
   'src/routes/setup.ts',
   'src/routes/auth.ts',
   'src/routes/apps.ts',
@@ -28,7 +30,14 @@ const requiredServerFiles = [
   'src/routes/clients.ts',
   '.env.example',
   'README.md',
-  'docs/INSTALL.md'
+  'docs/INSTALL.md',
+  'docs/GITHUB_APP_SOURCE.md',
+  'docs/PACKAGE_FORMAT.md',
+  'docs/SERVER_NODES.md',
+  'docs/ONE_LINE_INSTALL.md',
+  'src/services/packageValidator.ts',
+  'src/routes/nodes.ts',
+  'scripts/install.ps1'
 ];
 for (const file of requiredServerFiles) {
   if (!existsSync(file)) throw new Error(`Missing required server file: ${file}`);
@@ -42,7 +51,22 @@ const serverSourceChecks = [
   ['src/routes/apps.ts', "join(env.dataDir, 'tmp')", 'env data tmp upload folder'],
   ['src/routes/store.ts', '/sections', 'Store sections route'],
   ['src/routes/store.ts', '/featured', 'Store featured route'],
-  ['src/routes/releases.ts', "join(env.dataDir, 'tmp')", 'release upload tmp folder']
+  ['src/routes/releases.ts', "join(env.dataDir, 'tmp')", 'release upload tmp folder'],
+  ['src/routes/releases.ts', 'github-source/import-latest', 'GitHub app source route'],
+  ['src/services/githubImport.ts', 'fetchLatestGitHubRelease', 'GitHub latest release lookup'],
+  ['src/services/packageValidator.ts', 'validatePackageMetadata', 'package metadata validator'],
+  ['src/routes/releases.ts', '/admin/package/validate', 'package validation route'],
+  ['src/cli/update.ts', 'GitHub Releases', 'GitHub updater implementation'],
+  ['src/cli/update.ts', '--rollback', 'updater rollback support'],
+  ['src/cli/service.ts', 'systemd user service', 'Linux service support'],
+  ['src/index.ts', "'/admin'", 'dashboard route'],
+  ['src/routes/nodes.ts', '/nodes/join-request', 'node join request route'],
+  ['src/routes/nodes.ts', '/nodes/download-locations', 'download locations route'],
+  ['src/routes/nodes.ts', '/admin/nodes/requests/:id/approve', 'node approval route'],
+  ['src/cli/index.ts', 'echo-server node setup', 'node setup CLI help'],
+  ['src/cli/index.ts', 'echo-server sync setup', 'sync setup CLI help']
+,  ['src/cli/index.ts', 'echo-server install-info', 'install info CLI help']
+,  ['scripts/install.ps1', 'Echo App Server Installer', 'one-line GitHub installer']
 ];
 for (const [file, marker, label] of serverSourceChecks) {
   const text = readFileSync(file, 'utf8');

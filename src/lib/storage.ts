@@ -10,6 +10,9 @@ const initialDb: Database = {
   clients: [],
   installReports: [],
   auditLogs: [],
+  nodeRequests: [],
+  nodes: [],
+  syncSettings: { enabled: false, requireApproval: true, intervalMinutes: 15, allowDownloadMirrors: true, allowStandbyBackups: true },
 };
 
 function normalizeDb(input: Partial<Database>): Database {
@@ -21,6 +24,9 @@ function normalizeDb(input: Partial<Database>): Database {
     clients: (input.clients ?? []).map((client: any) => ({ ...client, installedApps: client.installedApps ?? [] })),
     installReports: input.installReports ?? [],
     auditLogs: input.auditLogs ?? [],
+    nodeRequests: input.nodeRequests ?? [],
+    nodes: input.nodes ?? [],
+    syncSettings: input.syncSettings ?? { enabled: false, requireApproval: true, intervalMinutes: 15, allowDownloadMirrors: true, allowStandbyBackups: true },
   };
 }
 

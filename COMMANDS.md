@@ -79,3 +79,21 @@ After `echo-server start`, the running server terminal accepts:
 /logs 25
 /stop
 ```
+
+## OpenClaw-style server management
+
+```bash
+echo-server onboard
+echo-server dashboard
+echo-server service install
+echo-server service start
+echo-server service stop
+echo-server service restart
+echo-server service status
+echo-server config show
+echo-server config set update.repo zmvz11/echo-app-server-windows
+echo-server update --check
+echo-server update --dry-run
+echo-server update
+echo-server update --rollback
+```
