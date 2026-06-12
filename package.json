@@ -1,0 +1,46 @@
+{
+  "name": "echo-app-server",
+  "version": "1.0.0",
+  "private": false,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "lint": "node scripts/lint-project.mjs",
+    "final-check": "node scripts/final-check.mjs",
+    "package:windows": "npm run build && powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-windows.ps1",
+    "echo": "tsx src/cli/index.ts",
+    "setup": "tsx src/cli/index.ts setup",
+    "doctor": "tsx src/cli/index.ts doctor",
+    "serve": "node dist/index.js",
+    "echo:start": "node dist/index.js",
+    "cli": "tsx src/cli/index.ts",
+    "server:start": "tsx src/cli/index.ts start",
+    "server:status": "tsx src/cli/index.ts status",
+    "server:stop": "tsx src/cli/index.ts stop",
+    "server:restart": "tsx src/cli/index.ts restart"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "helmet": "^7.1.0",
+    "multer": "^2.1.1",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/multer": "^2.1.0",
+    "@types/node": "^20.14.10",
+    "tsx": "^4.16.2",
+    "typescript": "^5.5.3"
+  },
+  "bin": {
+    "echo-server": "dist/cli/index.js"
+  },
+  "description": "Central server for Echo App Center accounts, apps, releases, and update distribution.",
+  "author": "Echo Apps"
+}

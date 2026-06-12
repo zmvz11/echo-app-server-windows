@@ -1,0 +1,13 @@
+{
+  "id": "echo-watchtower-sc",
+  "name": "Echo Watchtower SC",
+  "version": "1.0.0",
+  "channel": "stable",
+  "platform": "windows-x64",
+  "entry": "app/EchoWatchtowerSC.exe",
+  "installType": "portable",
+  "requires": {
+    "appCenter": ">=1.0.0",
+    "server": ">=1.0.0"
+  }
+}

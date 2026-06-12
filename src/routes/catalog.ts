@@ -1,0 +1,41 @@
+import { Router } from 'express';
+import type { JsonStore } from '../lib/storage.js';
+import type { AppRelease } from '../types.js';
+
+function compareVersion(a: string, b: string): number {
+  const pa = a.replace(/^v/, '').split(/[.-]/).map((x) => Number.parseInt(x, 10));
+  const pb = b.replace(/^v/, '').split(/[.-]/).map((x) => Number.parseInt(x, 10));
+  for (let i = 0; i < Math.max(pa.length, pb.length); i += 1) {
+    const av = Number.isFinite(pa[i]) ? pa[i] : 0;
+    const bv = Number.isFinite(pb[i]) ? pb[i] : 0;
+    if (av !== bv) return av - bv;
+  }
+  return a.localeCompare(b);
+}
+
+function latestRelease(releases: AppRelease[]): AppRelease | undefined {
+  return [...releases].sort((a, b) => compareVersion(a.version, b.version)).at(-1);
+}
+
+export function catalogRoutes(store: JsonStore): Router {
+  const router = Router();
+
+  router.get('/', (_req, res) => {
+    const db = store.read();
+    const apps = db.apps
+      .filter((app) => app.visibility === 'published')
+      .map((app) => ({ ...app, releases: db.releases.filter((rel) => rel.appId === app.id && rel.status === 'published') }));
+    res.json({ apps });
+  });
+
+  router.get('/latest/:appId', (req, res) => {
+    const channel = String(req.query.channel ?? 'stable');
+    const platform = String(req.query.platform ?? 'windows-x64');
+    const db = store.read();
+    const latest = latestRelease(db.releases.filter((rel) => rel.appId === req.params.appId && rel.status === 'published' && rel.channel === channel && rel.platform === platform));
+    if (!latest) return res.status(404).json({ error: 'No published release found.' });
+    res.json({ release: latest });
+  });
+
+  return router;
+}
