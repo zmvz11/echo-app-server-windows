@@ -36,4 +36,16 @@ for (const file of requiredServerFiles) {
 
 if (!existsSync('dist/cli/index.js')) throw new Error('Missing built CLI: dist/cli/index.js');
 if (!existsSync('src/cli/index.ts')) throw new Error('Missing CLI source: src/cli/index.ts');
+
+const serverSourceChecks = [
+  ['src/routes/apps.ts', 'media/upload', 'media upload route'],
+  ['src/routes/apps.ts', "join(env.dataDir, 'tmp')", 'env data tmp upload folder'],
+  ['src/routes/store.ts', '/sections', 'Store sections route'],
+  ['src/routes/store.ts', '/featured', 'Store featured route'],
+  ['src/routes/releases.ts', "join(env.dataDir, 'tmp')", 'release upload tmp folder']
+];
+for (const [file, marker, label] of serverSourceChecks) {
+  const text = readFileSync(file, 'utf8');
+  if (!text.includes(marker)) throw new Error(`Missing ${label} in ${file}`);
+}
 console.log('Echo App Server final check passed.');

@@ -33,10 +33,6 @@ const githubImportSchema = z.object({
   entrypoint: z.string().min(1).default(''),
 });
 
-const upload = multer({
-  dest: './data/tmp',
-  limits: { fileSize: 2 * 1024 * 1024 * 1024 },
-});
 
 function safeFileName(name: string): string {
   return name.replace(/[^a-zA-Z0-9._-]/g, '-');
@@ -59,6 +55,9 @@ function newestRelease(releases: AppRelease[]): AppRelease | undefined {
 
 export function releaseRoutes(store: JsonStore, env: Env): Router {
   const router = Router();
+  const tmpDir = join(env.dataDir, 'tmp');
+  mkdirSync(tmpDir, { recursive: true });
+  const upload = multer({ dest: tmpDir, limits: { fileSize: 2 * 1024 * 1024 * 1024 } });
 
   router.get('/admin', ...requirePermission(store, 'releases.create'), (_req, res) => {
     const db = store.read();
