@@ -6,6 +6,11 @@ export type AppVisibility = 'draft' | 'published' | 'hidden' | 'archived';
 export type PlatformId = 'windows-x64' | 'linux-x64' | string;
 export type PackageKind = 'zip' | 'echoapp';
 
+export type StoreLayoutSectionType = 'hero' | 'app_row' | 'app_grid' | 'category_row' | 'category_tabs' | 'promo' | 'spacer';
+export type StoreLayoutSource = 'manual' | 'featured' | 'recently_updated' | 'category' | 'all';
+export type StoreLayoutSection = { id: string; type: StoreLayoutSectionType; title: string; enabled: boolean; source: StoreLayoutSource; appIds: string[]; category?: string; limit: number; note?: string; };
+export type StoreLayout = { id: string; title: string; status: 'draft' | 'published'; updatedAt?: string; sections: StoreLayoutSection[]; };
+
 export type NodeRole = 'primary' | 'download_mirror' | 'standby_backup' | 'full_backup';
 export type NodeRequestStatus = 'pending' | 'approved' | 'rejected';
 export type NodeStatus = 'approved' | 'disabled' | 'offline';
@@ -50,4 +55,4 @@ export type ClientInstalledApp = { appId: string; version: string; platform: str
 export type ClientDevice = { id: string; name: string; platform: string; appCenterVersion: string; serverUrl?: string; lastCheckInAt: string; installedApps: ClientInstalledApp[]; };
 export type InstallReport = { id: string; clientId: string; appId: string; version?: string; action: 'install' | 'update' | 'repair' | 'uninstall' | 'launch'; status: 'started' | 'succeeded' | 'failed'; message?: string; createdAt: string; };
 export type AuditLog = { id: string; actorUserId?: string; action: string; targetType: string; targetId?: string; details?: Record<string, unknown>; createdAt: string; };
-export type Database = { users: User[]; sessions: Session[]; apps: EchoApp[]; releases: AppRelease[]; clients: ClientDevice[]; installReports: InstallReport[]; auditLogs: AuditLog[]; nodeRequests: EchoNodeRequest[]; nodes: EchoNode[]; syncSettings?: SyncSettings; };
+export type Database = { users: User[]; sessions: Session[]; apps: EchoApp[]; releases: AppRelease[]; clients: ClientDevice[]; installReports: InstallReport[]; auditLogs: AuditLog[]; nodeRequests: EchoNodeRequest[]; nodes: EchoNode[]; syncSettings?: SyncSettings; storeLayout?: StoreLayout; };

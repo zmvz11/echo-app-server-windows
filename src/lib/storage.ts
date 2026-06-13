@@ -13,6 +13,7 @@ const initialDb: Database = {
   nodeRequests: [],
   nodes: [],
   syncSettings: { enabled: false, requireApproval: true, intervalMinutes: 15, allowDownloadMirrors: true, allowStandbyBackups: true },
+  storeLayout: undefined,
 };
 
 function normalizeDb(input: Partial<Database>): Database {
@@ -27,6 +28,7 @@ function normalizeDb(input: Partial<Database>): Database {
     nodeRequests: input.nodeRequests ?? [],
     nodes: input.nodes ?? [],
     syncSettings: input.syncSettings ?? { enabled: false, requireApproval: true, intervalMinutes: 15, allowDownloadMirrors: true, allowStandbyBackups: true },
+    storeLayout: input.storeLayout,
   };
 }
 
